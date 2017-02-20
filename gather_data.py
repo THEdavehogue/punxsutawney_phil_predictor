@@ -180,3 +180,4 @@ if __name__ == '__main__':
     populate_weather_db(pred_coll)
 
     df = mongo_to_pandas(pred_coll)
+    df.to_csv('data/groundhog.csv')
