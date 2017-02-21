@@ -26,6 +26,7 @@ def fit_model(X_train, X_test, y_train, y_test):
     print "Recall: ", recall_score(y_test, y_pred)
     return model
 
+
 def plot_importances(model, df):
     importance_lst = zip(df.columns, model.feature_importances_)
     importance_lst.sort(key=lambda x: x[1])
