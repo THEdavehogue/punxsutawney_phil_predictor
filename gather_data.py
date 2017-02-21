@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import requests
 from time import sleep
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from progressbar import ProgressBar
 from pymongo import MongoClient
 
@@ -90,7 +90,7 @@ def unix_to_datetime(unix_time):
     return new_dt
 
 
-def empty_df():
+def empty_df(hourly=False):
     '''
     Function to create an empty pandas DataFrame object (used in mongo_to_pandas)
 
@@ -98,22 +98,36 @@ def empty_df():
 
     OUTPUT: empty pandas DataFrame object
     '''
-    df = pd.DataFrame(columns=['year',
-                               'max_temp',
-                               'min_temp',
-                               'dew_point',
-                               'humidity',
-                               'condition',
-                               'moon_phase',
-                               'precip_type',
-                               'visibility',
-                               'wind_bearing',
-                               'wind_speed',
-                               'prediction'])
+    if not hourly:
+        df = pd.DataFrame(columns=['date',
+                                   'max_temp',
+                                   'min_temp',
+                                   'dew_point',
+                                   'humidity',
+                                   'condition',
+                                   'moon_phase',
+                                   'precip_type',
+                                   'visibility',
+                                   'wind_bearing',
+                                   'wind_speed',
+                                   'prediction'])
+    else:
+        df = pd.DataFrame(columns=['date',
+                                   'time',
+                                   'feels_like_temp',
+                                   'dew_point',
+                                   'humidity',
+                                   'precip_type',
+                                   'summary',
+                                   'actual_temp',
+                                   'visibility',
+                                   'wind_bearing',
+                                   'wind_speed'])
     return df
 
 
-def parse_record(rec):
+
+def parse_record_daily(rec):
     '''
     Function to parse Mongo record into a pandas Series object
 
@@ -125,14 +139,14 @@ def parse_record(rec):
     '''
 
     daily = rec['daily']['data'][0]
-    year = unix_to_datetime(daily['time']).year
+    date = unix_to_datetime(daily['time']).date()
     if daily.get('icon', None) == 'partly-cloudy-day' or \
        daily.get('icon', None) == 'partly-cloudy-night':
         condition = 'partly-cloudy'
     else:
         condition = daily.get('icon', None)
 
-    row = {'year': year,
+    row = {'date': date,
            'max_temp': daily.get('temperatureMax', None),
            'min_temp': daily.get('temperatureMin', None),
            'dew_point': daily.get('dewPoint', None),
@@ -145,6 +159,39 @@ def parse_record(rec):
            'wind_speed': daily.get('windSpeed', None),
            'prediction': rec.get('prediction', None)}
     return pd.Series(row)
+
+
+def parse_record_hourly(rec):
+    '''
+    Function to parse Mongo record into a pandas Series object
+
+    INPUT:
+        rec: record from MongoDB
+
+    OUTPUT:
+        row: Mongo record converted to pandas DataFrame
+    '''
+    rows = empty_df(hourly=True)
+    offset = rec['offset']
+    hourly = rec['hourly']['data']
+    date = unix_to_datetime(rec['daily']['data'][0]['time']).date()
+    for hour in hourly:
+        local_time = unix_to_datetime(hour['time']) + timedelta(hours=offset)
+        row = {'date': date,
+               'time': local_time.time(),
+               'feels_like_temp': hour.get('apparentTemperature'),
+               'dew_point': hour.get('dewPoint'),
+               'humidity': hour.get('humidity'),
+               'precip_type': hour.get('precipType'),
+               'summary': hour.get('summary'),
+               'actual_temp': hour.get('temperature'),
+               'visibility': hour.get('visibility'),
+               'wind_bearing': hour.get('windBearing', 0),
+               'wind_speed': hour.get('windSpeed', 0),
+               'prediction': rec.get('prediction')}
+        rows = rows.append(pd.Series(row), ignore_index=True)
+    return rows
+
 
 
 def mongo_to_pandas(db_coll):
@@ -160,16 +207,64 @@ def mongo_to_pandas(db_coll):
 
     c = db_coll.find()
     records = list(c)
-    df = empty_df()
+    df_daily = empty_df(hourly=False)
+    df_hourly = empty_df(hourly=True)
     pbar = ProgressBar()
     for rec in pbar(records):
-        row = parse_record(rec)
-        df = df.append(row, ignore_index=True)
-        df['year'] = df['year'].astype(int)
+        day = parse_record_daily(rec)
+        df_daily = df_daily.append(day, ignore_index=True)
+        hours = parse_record_hourly(rec)
+        df_hourly = df_hourly.append(hours, ignore_index=True)
+    for df in [df_daily, df_hourly]:
         df['wind_bearing'] = df['wind_bearing'].astype(int)
         df['prediction'] = df['prediction'].astype(int)
-    return df
+    df_hourly['precip_type'] = df_hourly['precip_type'].fillna('None')
+    return df_daily, df_hourly
 
+
+def scrub_data(df, hourly=False):
+    if not hourly:
+        df_daily = df
+        df_precip_dummies = pd.get_dummies(df['precip_type'], drop_first=True)
+        df_condition_dummies = pd.get_dummies(df['condition'], drop_first=True)
+        df_daily = df.drop(['date', 'condition', 'precip_type'], axis=1)
+        df_daily = pd.concat([df_daily, df_precip_dummies, df_condition_dummies], axis=1)
+        return df_daily
+    else:
+        df_hourly = df
+        mask_a = df_hourly['time'] >= time(7, 0)
+        mask_b = df_hourly['time'] <= time(9, 0)
+        df_morning = df_hourly[mask_a & mask_b]
+        dates = df_morning['date'].unique()
+        df_summaries = pd.DataFrame(columns = df_morning.columns)
+
+        for dt in dates:
+            new_row = {}
+            df_slice = df_morning[df_morning['date'] == dt]
+            new_row['actual_temp'] = df_slice['actual_temp'].mean()
+            new_row['date'] = dt
+            new_row['dew_point'] = df_slice['dew_point'].mean()
+            new_row['feels_like_temp'] = df_slice['feels_like_temp'].mean()
+            new_row['humidity'] = df_slice['humidity'].mean()
+            try:
+                new_row['precip_type'] = df_slice['precip_type'].mode()[0]
+            except:
+                new_row['precip_type'] = 'None'
+            new_row['prediction'] = df_slice['prediction'].mean()
+            try:
+                new_row['summary'] = df_slice['summary'].mode()[0]
+            except:
+                new_row['summary'] = 'Overcast'
+            new_row['time'] = 'morning avg'
+            new_row['visibility'] = df_slice['visibility'].mean()
+            new_row['wind_bearing'] = df_slice['wind_bearing'].mean()
+            new_row['wind_speed'] = df_slice['wind_speed'].mean()
+            df_summaries = df_summaries.append(pd.Series(new_row), ignore_index=True)
+        df_precip_dummies = pd.get_dummies(df_summaries['precip_type'], drop_first=True)
+        df_summary_dummies = pd.get_dummies(df_summaries['summary'], drop_first=True)
+        df_summaries = df_summaries.drop(['date', 'precip_type', 'summary', 'time'], axis=1)
+        df_summaries = pd.concat([df_summaries, df_precip_dummies, df_summary_dummies], axis=1)
+        return df_summaries
 
 if __name__ == '__main__':
 
@@ -179,5 +274,10 @@ if __name__ == '__main__':
 
     populate_weather_db(pred_coll)
 
-    df = mongo_to_pandas(pred_coll)
-    df.to_csv('data/groundhog.csv')
+    df_daily, df_hourly = mongo_to_pandas(pred_coll)
+    df_daily_scrubbed = scrub_data(df_daily, hourly=False)
+    df_hourly_scrubbed = scrub_data(df_hourly, hourly=True)
+    df_daily.to_pickle('data/groundhog_daily.pkl')
+    df_hourly.to_pickle('data/groundhog_hourly.pkl')
+    df_daily_scrubbed.to_pickle('data/groundhog_daily_scrubbed.pkl')
+    df_hourly_scrubbed.to_pickle('data/groundhog_hourly_scrubbed.pkl')
