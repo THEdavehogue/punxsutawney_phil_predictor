@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import cPickle as pickle
 from sklearn.cross_validation import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score
@@ -40,11 +41,18 @@ def plot_importances(model, df):
     ax.set_xlabels=labels
     plt.xticks(range(len(importances)), labels, rotation=60, fontsize=18)
     plt.yticks(fontsize=18)
+    plt.tight_layout()
     plt.savefig('img/feature_importance.png')
     plt.show()
+
+
+def pickle_model(model):
+    with open('data/model.pkl', 'wb') as f:
+        pickle.dump(model, f)
 
 
 if __name__ == '__main__':
     df, X_train, X_test, y_train, y_test = load_split_data('data/groundhog_hourly_scrubbed.pkl')
     model = fit_model(X_train, X_test, y_train, y_test)
     plot_importances(model, df)
+    pickle_model(model)
